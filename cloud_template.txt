@@ -1,0 +1,271 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Cloudformation template to encode videos using PHP",
+
+  "Parameters" : {
+    "InstanceType" : {
+      "Description" : "Worker EC2 instance type",
+      "Type" : "String",
+      "Default" : "t1.micro",
+      "AllowedValues" : [ "t1.micro","m1.small","m1.medium","m1.large","m1.xlarge","m2.xlarge","m2.2xlarge","m2.4xlarge","c1.medium","c1.xlarge","cc1.4xlarge","cc2.8xlarge","cg1.4xlarge"],
+      "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+
+    "KeyName" : {
+      "Description" : "The EC2 Key Pair to allow SSH access to the instances",
+      "Type" : "String"
+    },
+
+    "MinInstances" : {
+      "Description" : "The minimum number of Workers",
+      "Type" : "Number",
+      "MinValue" : "0",
+      "Default"  : "0",
+      "ConstraintDescription" : "Enter a number >=0"
+    },
+
+    "MaxInstances" : {
+      "Description" : "The maximum number of Workers",
+      "Type" : "Number",
+      "MinValue" : "1",
+      "Default"  : "1",
+      "ConstraintDescription" : "Enter a number >1"
+    }
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "t1.micro"    : { "Arch" : "64" },
+      "m1.small"    : { "Arch" : "64" },
+      "m1.medium"   : { "Arch" : "64" },
+      "m1.large"    : { "Arch" : "64" },
+      "m1.xlarge"   : { "Arch" : "64" },
+      "m2.xlarge"   : { "Arch" : "64" },
+      "m2.2xlarge"  : { "Arch" : "64" },
+      "m2.4xlarge"  : { "Arch" : "64" },
+      "c1.medium"   : { "Arch" : "64" },
+      "c1.xlarge"   : { "Arch" : "64" },
+      "cc1.4xlarge" : { "Arch" : "64HVM" },
+      "cc2.8xlarge" : { "Arch" : "64HVM" },
+      "cg1.4xlarge" : { "Arch" : "64HVM" }
+    },
+
+    "AWSRegionArch2AMI" : {
+      "us-east-1"      : { "32" : "NOT_YET_SUPPORTED", "64" : "NOT_YET_SUPPORTED", "64HVM" : "NOT_YET_SUPPORTED" },
+      "us-west-2"      : { "32" : "NOT_YET_SUPPORTED", "64" : "ami-fc2ba7cc", "64HVM" : "NOT_YET_SUPPORTED" },
+      "us-west-1"      : { "32" : "NOT_YET_SUPPORTED", "64" : "ami-fc2ba7cc", "64HVM" : "NOT_YET_SUPPORTED" },
+      "eu-west-1"      : { "32" : "NOT_YET_SUPPORTED", "64" : "NOT_YET_SUPPORTED", "64HVM" : "NOT_YET_SUPPORTED" },
+      "ap-southeast-1" : { "32" : "NOT_YET_SUPPORTED", "64" : "NOT_YET_SUPPORTED", "64HVM" : "NOT_YET_SUPPORTED" },
+      "ap-northeast-1" : { "32" : "NOT_YET_SUPPORTED", "64" : "NOT_YET_SUPPORTED", "64HVM" : "NOT_YET_SUPPORTED" },
+      "sa-east-1"      : { "32" : "NOT_YET_SUPPORTED", "64" : "NOT_YET_SUPPORTED", "64HVM" : "NOT_YET_SUPPORTED" }
+    }
+  },
+
+  "Resources" : {
+
+    "WorkerUser" : {
+      "Type" : "AWS::IAM::User",
+      "Properties" : {
+        "Path": "/",
+        "Policies": [{
+          "PolicyName": "root",
+          "PolicyDocument": { "Statement":[{
+            "Effect": "Allow",
+            "Action": [
+              "cloudformation:DescribeStackResource",
+              "sqs:ReceiveMessage",
+              "sqs:DeleteMessage",
+              "sns:Publish"
+            ],
+            "Resource": "*"
+          }]}
+        }]
+      }
+    },
+
+    "WorkerKeys" : {
+      "Type" : "AWS::IAM::AccessKey",
+      "Properties" : {
+        "UserName" : {"Ref": "WorkerUser"}
+      }
+    },
+
+    "InstanceSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable SSH access",
+        "SecurityGroupIngress" : [ { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : "0.0.0.0/0" } ]
+      }
+    },
+
+	"UploadsSQSPolicy" : {
+      "Type" : "AWS::SQS::QueuePolicy",
+      "Properties" : {
+        "Queues" : [ "your_input_queue_url_here" ],
+        "PolicyDocument":  {
+          "Version": "2008-10-17",
+          "Id": "WorkerUploadsPolicy",
+          "Statement" : [ {
+            "Sid": "Allow-User-Control",
+            "Effect": "Allow",
+            "Principal" : { "AWS": {"Fn::GetAtt" : ["WorkerUser", "Arn"]} },
+            "Action": "SQS:*",
+            "Resource": "*"
+          } ]
+        }
+      }
+    },
+
+	"OutputsSQSQueuePolicy" : {
+	   "Type" : "AWS::SQS::QueuePolicy",
+	   "Properties" : {
+	      "PolicyDocument" : {
+	         "Version" : "2008-10-17",
+	         "Id" : "WorkerOuputsPolicy",
+	         "Statement" : [ {
+	            "Sid" : "Allow-User-Control",
+	            "Effect" : "Allow",
+	            "Principal" : {
+	               "AWS" : {"Fn::GetAtt" : ["WorkerUser", "Arn"]}
+	            },
+	            "Action": "SQS:*",
+	            "Resource" : "*"
+	         } ]
+	      },
+	      "Queues" : [
+	         "your_output_queue_url_here"
+	      ]
+	   }
+	},
+
+    "LaunchConfig" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata" : {
+        "Comment" : "Install the cronjob to process encoding",
+        "AWS::CloudFormation::Init" : {
+           "config" : {
+            "files" : {
+              "/etc/cron.d/worker" : {
+                "content" : "*/1 * * * * ubuntu /home/ubuntu/worker_cronjob >> /home/ubuntu/worker.log\n",
+                "mode"    : "000644",
+                "owner"   : "root",
+                "group"   : "root"
+              },
+
+              "/home/ubuntu/worker_cronjob" : {
+                "content" : { "Fn::Join" : ["", [
+                	"#!/usr/bin/env php\n",
+	                "<?php\n",
+	                "define('ROOT', dirname(__FILE__));",
+					"const AWS_KEY = \"", { "Ref" : "WorkerKeys" }, "\";",
+					"const AWS_SECRET = \"", { "Fn::GetAtt": ["WorkerKeys", "SecretAccessKey"]}, "\";",
+					"const QUEUE = 'your_input_queue_url_here';",
+					"echo '[ NEW CRON STARTED ]\n';",
+					"function logEvent($message){",
+					"echo '[ '.date('d-m-Y H:i:s').' '.microtime(true).' ] '.$message.'\n';",
+					"}",
+					"exec('git clone https://github.com/Sammaye/aws_worker.git '.ROOT.'/worker');",
+					"if(!file_exists(ROOT.'/worker/worker_despatcher.php')){",
+					"logEvent('GIT not downloaded right');",
+					"exit();",
+					"}",
+					"logEvent('GIT downloaded');",
+					"include_once ROOT.'/worker/worker_despatcher.php';"
+                ]]},
+                "mode"    : "000755",
+                "owner"   : "ubuntu",
+                "group"   : "ubuntu"
+              }
+            }
+          }
+        }
+      },
+      "Properties" : {
+        "KeyName" : { "Ref" : "KeyName" },
+        "SpotPrice" : "0.05",
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionArch2AMI", { "Ref" : "AWS::Region" },
+                                          { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "InstanceType" },
+                                          "Arch" ] } ] },
+        "SecurityGroups" : [ { "Ref" : "InstanceSecurityGroup" } ],
+        "InstanceType" : { "Ref" : "InstanceType" },
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash\n",
+          "apt-get -y install python-setuptools\n",
+          "easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz\n",
+          "cfn-init -v ",
+	      "         -s ", { "Ref" : "AWS::StackName" },
+	      "         -r LaunchConfig ",
+	      "         --access-key ", { "Ref" : "WorkerKeys" },
+	      "         --secret-key ", {"Fn::GetAtt": ["WorkerKeys", "SecretAccessKey"]},
+	      "         --region ", { "Ref" : "AWS::Region" }, "\n"
+        ]]}}
+      }
+    },
+
+    "VideoEncodingGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "AvailabilityZones" : { "Fn::GetAZs" : ""},
+        "LaunchConfigurationName" : { "Ref" : "LaunchConfig" },
+        "MinSize" : { "Ref" : "MinInstances" },
+        "MaxSize" : { "Ref" : "MaxInstances" }
+      }
+    },
+
+    "WorkerScaleUpPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : { "Ref" : "VideoEncodingGroup" },
+        "Cooldown" : "60",
+        "ScalingAdjustment" : "1"
+      }
+    },
+
+    "WorkerScaleDownPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : { "Ref" : "VideoEncodingGroup" },
+        "Cooldown" : "60",
+        "ScalingAdjustment" : "-1"
+      }
+    },
+
+    "TooManyMessagesAlarm": {
+     "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-Up if queue depth grows beyond 10 messages",
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Dimensions": [{ "Name": "QueueName", "Value" : "your_input_queue_name_here" }],
+        "Statistic": "Sum",
+        "Period": "60",
+        "EvaluationPeriods": "3",
+        "Threshold": "1",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "AlarmActions": [ { "Ref": "WorkerScaleUpPolicy" } ]
+      }
+    },
+
+    "NotEnoughMessagesAlarm": {
+     "Type": "AWS::CloudWatch::Alarm",
+     "Properties": {
+        "AlarmDescription": "Scale-down if there are too many empty polls, indicating there is not enough work",
+        "Namespace": "AWS/SQS",
+        "MetricName": "NumberOfEmptyReceives",
+        "Dimensions": [{ "Name": "QueueName", "Value" : "your_input_queue_name_here" }],
+        "Statistic": "Sum",
+        "Period": "60",
+        "EvaluationPeriods": "10",
+        "Threshold": "3",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "AlarmActions": [ { "Ref": "WorkerScaleDownPolicy" } ]
+      }
+    }
+  },
+
+  "Outputs" : {
+  }
+}
